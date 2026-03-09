@@ -1,8 +1,10 @@
+using ArabianHorseSystem.Data;
 using ArabianHorseSystem.DTOs;
 using ArabianHorseSystem.Models;
 using ArabianHorseSystem.Services;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
@@ -20,6 +22,7 @@ namespace ArabianHorseSystem.Controllers
         private readonly IEmailService _emailService;
         private readonly IFileService _fileService;
         private readonly ILogger<AccountController> _logger;
+        private readonly ApplicationDbContext _context; // أضفنا DbContext
 
         public AccountController(
             UserManager<User> userManager,
@@ -27,7 +30,8 @@ namespace ArabianHorseSystem.Controllers
             IConfiguration configuration,
             IEmailService emailService,
             IFileService fileService,
-            ILogger<AccountController> logger)
+            ILogger<AccountController> logger,
+            ApplicationDbContext context) // أضفنا DbContext
         {
             _userManager = userManager;
             _signInManager = signInManager;
@@ -35,9 +39,10 @@ namespace ArabianHorseSystem.Controllers
             _emailService = emailService;
             _fileService = fileService;
             _logger = logger;
+            _context = context; // أضفنا DbContext
         }
 
-        #regionRegistration & Login
+        #region Registration & Login
 
         [HttpPost("register")]
         public async Task<IActionResult> Register([FromForm] RegisterDto model)
@@ -47,14 +52,14 @@ namespace ArabianHorseSystem.Controllers
                 if (!ModelState.IsValid)
                     return BadRequest(ModelState);
 
-                // 1. التحقق من عدم وجود البريد الإلكتروني
+                // التحقق من وجود البريد الإلكتروني
                 var existingUser = await _userManager.FindByEmailAsync(model.Email);
                 if (existingUser != null)
                 {
                     return BadRequest(new[] { new { description = "البريد الإلكتروني موجود بالفعل" } });
                 }
 
-                // 2. إنشاء المستخدم الأساسي
+                // إنشاء المستخدم الأساسي
                 var user = new User
                 {
                     UserName = model.Email,
@@ -64,13 +69,12 @@ namespace ArabianHorseSystem.Controllers
                     Role = model.Role,
                     HowDidYouHear = model.HowDidYouHear,
                     CreatedAt = DateTime.UtcNow,
-                    
-                    // تحديد حالة الحساب حسب الدور
-                    IsApproved = model.Role == "User" || model.Role == "Buyer",
-                    EmailConfirmed = false // محتاج تأكيد إيميل
+                    IsApproved = model.Role == "User" || model.Role == "Buyer", // المستخدم العادي والمشتري يتم تفعيلهم فوراً
+                    EmailConfirmed = false,
+                    IsVerifiedBidder = false
                 };
 
-                // 3. إنشاء المستخدم في Identity
+                // إنشاء المستخدم في Identity
                 var result = await _userManager.CreateAsync(user, model.Password);
 
                 if (!result.Succeeded)
@@ -79,11 +83,11 @@ namespace ArabianHorseSystem.Controllers
                     return BadRequest(errors);
                 }
 
-                // 4. إضافة الـ Role في Identity (اختياري)
+                // إضافة الـ Role في Identity
                 await _userManager.AddToRoleAsync(user, model.Role);
 
-                // 5. إضافة التفاصيل حسب الدور
-                using var transaction = await _userManager.CreateTransaction(); // لو عندك Transactions
+                // إضافة التفاصيل حسب الدور
+                using var transaction = await _context.Database.BeginTransactionAsync(); // استخدام _context بدل _userManager
                 
                 try
                 {
@@ -101,8 +105,7 @@ namespace ArabianHorseSystem.Controllers
                                 ExperienceYears = model.ExperienceYears ?? 0,
                                 SellerRole = model.SellerRole
                             };
-                            // حفظ في قاعدة البيانات (اعملي DbSet مخصوص)
-                            // _context.SellerDetails.Add(sellerDetails);
+                            _context.SellerDetails.Add(sellerDetails);
                             break;
 
                         case "Buyer":
@@ -112,7 +115,7 @@ namespace ArabianHorseSystem.Controllers
                                 NationalId = model.NationalId,
                                 Governorate = model.Governorate
                             };
-                            // _context.BuyerDetails.Add(buyerDetails);
+                            _context.BuyerDetails.Add(buyerDetails);
                             break;
 
                         case "EquineVet":
@@ -128,11 +131,13 @@ namespace ArabianHorseSystem.Controllers
                                 VetBio = model.VetBio,
                                 ConfirmAccuracy = model.ConfirmAccuracy
                             };
-                            // _context.VetDetails.Add(vetDetails);
+                            _context.VetDetails.Add(vetDetails);
                             break;
                     }
 
-                    // 6. حفظ الملفات
+                    await _context.SaveChangesAsync(); // حفظ التفاصيل
+
+                    // حفظ الملفات
                     if (model.NationalIdFile != null)
                     {
                         var filePath = await _fileService.SaveFileAsync(
@@ -141,14 +146,13 @@ namespace ArabianHorseSystem.Controllers
                             "NationalId"
                         );
 
-                        // حفظ معلومات الملف في قاعدة البيانات
-                        // _context.UserDocuments.Add(new UserDocument
-                        // {
-                        //     UserId = user.Id,
-                        //     DocumentType = "NationalId",
-                        //     FileName = model.NationalIdFile.FileName,
-                        //     FilePath = filePath
-                        // });
+                        _context.UserDocuments.Add(new UserDocument
+                        {
+                            UserId = user.Id,
+                            DocumentType = "NationalId",
+                            FileName = model.NationalIdFile.FileName,
+                            FilePath = filePath
+                        });
                     }
 
                     if (model.Role == "Seller" && model.RecommendationLetter != null)
@@ -158,7 +162,14 @@ namespace ArabianHorseSystem.Controllers
                             user.Id.ToString(),
                             "Recommendation"
                         );
-                        // حفظ في قاعدة البيانات
+                        
+                        _context.UserDocuments.Add(new UserDocument
+                        {
+                            UserId = user.Id,
+                            DocumentType = "Recommendation",
+                            FileName = model.RecommendationLetter.FileName,
+                            FilePath = filePath
+                        });
                     }
 
                     if (model.Role == "EquineVet")
@@ -170,7 +181,14 @@ namespace ArabianHorseSystem.Controllers
                                 user.Id.ToString(),
                                 "License"
                             );
-                            // حفظ في قاعدة البيانات
+                            
+                            _context.UserDocuments.Add(new UserDocument
+                            {
+                                UserId = user.Id,
+                                DocumentType = "License",
+                                FileName = model.LicenseFile.FileName,
+                                FilePath = filePath
+                            });
                         }
 
                         if (model.VetCertificates != null)
@@ -180,15 +198,21 @@ namespace ArabianHorseSystem.Controllers
                                 user.Id.ToString(),
                                 "Certificate"
                             );
-                            // حفظ في قاعدة البيانات
+                            
+                            _context.UserDocuments.Add(new UserDocument
+                            {
+                                UserId = user.Id,
+                                DocumentType = "Certificate",
+                                FileName = model.VetCertificates.FileName,
+                                FilePath = filePath
+                            });
                         }
                     }
 
-                    // 7. حفظ كل التغييرات
-                    // await _context.SaveChangesAsync();
-                    // await transaction.CommitAsync();
+                    await _context.SaveChangesAsync(); // حفظ الملفات
+                    await transaction.CommitAsync();
 
-                    // 8. إرسال إيميل التأكيد
+                    // إرسال إيميل التأكيد
                     await SendConfirmationEmail(user);
 
                     return Ok(new
@@ -201,19 +225,19 @@ namespace ArabianHorseSystem.Controllers
                 }
                 catch (Exception ex)
                 {
-                    // await transaction.RollbackAsync();
+                    await transaction.RollbackAsync();
                     _logger.LogError(ex, "Error saving user details");
                     
                     // حذف المستخدم لو حصل خطأ
                     await _userManager.DeleteAsync(user);
                     
-                    return StatusCode(500, new[] { new { description = "حدث خطأ أثناء حفظ البيانات" } });
+                    return StatusCode(500, new[] { new { description = "حدث خطأ أثناء حفظ البيانات: " + ex.Message } });
                 }
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Registration error");
-                return StatusCode(500, new[] { new { description = "حدث خطأ في الخادم" } });
+                return StatusCode(500, new[] { new { description = "حدث خطأ في الخادم: " + ex.Message } });
             }
         }
 
@@ -261,7 +285,8 @@ namespace ArabianHorseSystem.Controllers
                         user.Email,
                         user.Role,
                         user.ProfilePictureUrl,
-                        user.IsVerifiedBidder
+                        user.IsVerifiedBidder,
+                        user.IsApproved
                     }
                 });
             }
@@ -286,7 +311,9 @@ namespace ArabianHorseSystem.Controllers
                 new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
                 new Claim(ClaimTypes.Role, user.Role ?? ""),
                 new Claim("FullName", user.FullName ?? ""),
-                new Claim("UserId", user.Id.ToString())
+                new Claim("UserId", user.Id.ToString()),
+                new Claim("IsApproved", user.IsApproved.ToString()),
+                new Claim("IsVerifiedBidder", user.IsVerifiedBidder.ToString())
             };
 
             // إضافة Roles من Identity
@@ -503,24 +530,52 @@ namespace ArabianHorseSystem.Controllers
         [HttpGet("profile")]
         public async Task<IActionResult> GetProfile()
         {
-            var user = await _userManager.GetUserAsync(User);
-            if (user == null)
+            try
             {
-                return Unauthorized();
-            }
+                var user = await _userManager.GetUserAsync(User);
+                if (user == null)
+                {
+                    return Unauthorized();
+                }
 
-            return Ok(new
+                // جلب التفاصيل الإضافية حسب الدور
+                object? additionalDetails = null;
+
+                switch (user.Role)
+                {
+                    case "Seller":
+                        additionalDetails = await _context.SellerDetails
+                            .FirstOrDefaultAsync(s => s.UserId == user.Id);
+                        break;
+                    case "Buyer":
+                        additionalDetails = await _context.BuyerDetails
+                            .FirstOrDefaultAsync(b => b.UserId == user.Id);
+                        break;
+                    case "EquineVet":
+                        additionalDetails = await _context.VetDetails
+                            .FirstOrDefaultAsync(v => v.UserId == user.Id);
+                        break;
+                }
+
+                return Ok(new
+                {
+                    user.Id,
+                    user.FullName,
+                    user.Email,
+                    user.PhoneNumber,
+                    user.Role,
+                    user.ProfilePictureUrl,
+                    user.IsVerifiedBidder,
+                    user.CreatedAt,
+                    user.IsApproved,
+                    additionalDetails
+                });
+            }
+            catch (Exception ex)
             {
-                user.Id,
-                user.FullName,
-                user.Email,
-                user.PhoneNumber,
-                user.Role,
-                user.ProfilePictureUrl,
-                user.IsVerifiedBidder,
-                user.CreatedAt,
-                user.IsApproved
-            });
+                _logger.LogError(ex, "Error getting profile");
+                return StatusCode(500, new { message = "حدث خطأ في الخادم" });
+            }
         }
 
         #endregion
