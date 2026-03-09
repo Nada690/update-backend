@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using System.Text;
+using System.Security.Claims;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -76,18 +77,55 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("VerifiedBidder", policy => 
         policy.RequireClaim("IsVerifiedBidder", "True"));
     
-    // Policy للبائعين فقط
-    options.AddPolicy("SellerOnly", policy => 
-        policy.RequireRole("Seller"));
+    // Policy للبائعين فقط (طريقة 1: باستخدام RequireAssertion)
+    options.AddPolicy("SellerOnly", policy =>
+        policy.RequireAssertion(context =>
+            context.User.HasClaim(c => c.Type == ClaimTypes.Role && 
+                (c.Value == "Seller" || c.Value == "Admin"))));
+    
+    // Policy للبائعين فقط (طريقة 2: باستخدام RequireRole - أبسط)
+    options.AddPolicy("SellerOnlySimple", policy =>
+        policy.RequireRole("Seller", "Admin"));
     
     // Policy للأطباء فقط
     options.AddPolicy("VetOnly", policy => 
         policy.RequireRole("EquineVet"));
+    
+    // Policy للمشترين فقط
+    options.AddPolicy("BuyerOnly", policy =>
+        policy.RequireRole("Buyer"));
+    
+    // Policy للمستخدمين العاديين
+    options.AddPolicy("UserOnly", policy =>
+        policy.RequireRole("User"));
+    
+    // Policy للمستخدمين المسجلين (أي دور)
+    options.AddPolicy("AuthenticatedUsers", policy =>
+        policy.RequireAuthenticatedUser());
+    
+    // Policy متقدمة: البائعون الذين لديهم خيول نشطة
+    options.AddPolicy("ActiveSeller", policy =>
+        policy.RequireAssertion(context =>
+            context.User.HasClaim(c => c.Type == ClaimTypes.Role && c.Value == "Seller") &&
+            context.User.HasClaim(c => c.Type == "HasActiveHorses" && c.Value == "True")));
+    
+    // Policy متقدمة: المستخدمون الذين أكملوا ملفاتهم
+    options.AddPolicy("ProfileCompleted", policy =>
+        policy.RequireAssertion(context =>
+            context.User.HasClaim(c => c.Type == "ProfileCompleted" && c.Value == "True")));
+    
+    // Policy للبائعين المميزين
+    options.AddPolicy("PremiumSeller", policy =>
+        policy.RequireAssertion(context =>
+            context.User.HasClaim(c => c.Type == ClaimTypes.Role && c.Value == "Seller") &&
+            context.User.HasClaim(c => c.Type == "SellerTier" && c.Value == "Premium")));
 });
 
 // ========== 5. تسجيل Services الخاصة بنا ==========
 builder.Services.AddScoped<IFileService, FileService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
+builder.Services.AddScoped<IAuctionService, AuctionService>();
+builder.Services.AddScoped<INotificationService, NotificationService>();
 
 // ========== 6. إضافة Controllers ==========
 builder.Services.AddControllers()
@@ -112,6 +150,19 @@ builder.Services.AddCors(options =>
                 .AllowAnyMethod()
                 .AllowCredentials();
         });
+    
+    // سياسة CORS إضافية للإنتاج
+    options.AddPolicy("ProductionPolicy",
+        policy =>
+        {
+            policy.WithOrigins(
+                    "https://yourdomain.com",
+                    "https://www.yourdomain.com"
+                )
+                .AllowAnyHeader()
+                .AllowAnyMethod()
+                .AllowCredentials();
+        });
 });
 
 // ========== 8. إضافة Swagger ==========
@@ -122,7 +173,12 @@ builder.Services.AddSwaggerGen(c =>
     { 
         Title = "Arabian Horse System API", 
         Version = "v1",
-        Description = "API لنظام الخيول العربية"
+        Description = "API لنظام الخيول العربية",
+        Contact = new OpenApiContact
+        {
+            Name = "Support Team",
+            Email = "support@arabianhorse.com"
+        }
     });
     
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
@@ -148,12 +204,29 @@ builder.Services.AddSwaggerGen(c =>
             new string[] {}
         }
     });
+    
+    // إضافة تعليقات XML إذا وجدت
+    var xmlFile = $"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}.xml";
+    var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+    if (File.Exists(xmlPath))
+    {
+        c.IncludeXmlComments(xmlPath);
+    }
 });
 
-// ========== 9. بناء التطبيق ==========
+// ========== 9. إضافة Response Caching ==========
+builder.Services.AddResponseCaching();
+
+// ========== 10. إضافة HttpContextAccessor ==========
+builder.Services.AddHttpContextAccessor();
+
+// ========== 11. إضافة Memory Cache ==========
+builder.Services.AddMemoryCache();
+
+// ========== 12. بناء التطبيق ==========
 var app = builder.Build();
 
-// ========== 10. إعداد Middleware Pipeline ==========
+// ========== 13. إعداد Middleware Pipeline ==========
 
 if (app.Environment.IsDevelopment())
 {
@@ -161,12 +234,13 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI(c =>
     {
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "Arabian Horse API V1");
-        c.RoutePrefix = string.Empty;
+        c.RoutePrefix = string.Empty; // يجعل Swagger في المسار الرئيسي
     });
 }
 else
 {
     app.UseHttpsRedirection();
+    app.UseResponseCaching();
 }
 
 app.UseCors("AllowReactApp");
@@ -174,9 +248,21 @@ app.UseStaticFiles();
 app.UseRouting();
 app.UseAuthentication();
 app.UseAuthorization();
+
+// ========== 14. إضافة Middleware مخصص ==========
+app.Use(async (context, next) =>
+{
+    // إضافة Headers أمنية
+    context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
+    context.Response.Headers.Add("X-Frame-Options", "DENY");
+    context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
+    
+    await next();
+});
+
 app.MapControllers();
 
-// ========== 11. Seed Database (مع تشغيل الـ Seeder) ==========
+// ========== 15. Seed Database (مع تشغيل الـ Seeder) ==========
 using (var scope = app.Services.CreateScope())
 {
     var services = scope.ServiceProvider;
@@ -187,6 +273,9 @@ using (var scope = app.Services.CreateScope())
         
         // ✅ هنا شغلي الـ Seeder (فكي التعليق)
         await DbSeeder.SeedAsync(services);
+        
+        var logger = services.GetRequiredService<ILogger<Program>>();
+        logger.LogInformation("Database migrated and seeded successfully.");
     }
     catch (Exception ex)
     {
@@ -195,5 +284,5 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
-// ========== 12. تشغيل التطبيق ==========
+// ========== 16. تشغيل التطبيق ==========
 app.Run();
