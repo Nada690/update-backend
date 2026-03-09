@@ -26,7 +26,7 @@ builder.Services.AddIdentity<User, IdentityRole<int>>(options =>
     
     // إعدادات User
     options.User.RequireUniqueEmail = true;
-    options.SignIn.RequireConfirmedEmail = false; // حالياً مش مفعلة
+    options.SignIn.RequireConfirmedEmail = false;
     
     // Lockout settings
     options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(5);
@@ -36,7 +36,7 @@ builder.Services.AddIdentity<User, IdentityRole<int>>(options =>
 .AddEntityFrameworkStores<ApplicationDbContext>()
 .AddDefaultTokenProviders();
 
-// ========== 3. إضافة JWT Authentication (الجزء المطلوب) ==========
+// ========== 3. إضافة JWT Authentication ==========
 builder.Services.AddAuthentication(options =>
 {
     options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
@@ -61,35 +61,52 @@ builder.Services.AddAuthentication(options =>
     };
 });
 
-// ========== 4. إضافة Authorization ==========
-builder.Services.AddAuthorization();
+// ========== 4. إضافة Authorization مع Policies ==========
+builder.Services.AddAuthorization(options =>
+{
+    // Policies للـ Admin
+    options.AddPolicy("AdminOnly", policy => 
+        policy.RequireRole("Admin"));
+    
+    // Policy للمستخدمين الموافق عليهم
+    options.AddPolicy("ApprovedOnly", policy => 
+        policy.RequireClaim("IsApproved", "True"));
+    
+    // Policy للمستخدمين الموثقين للمزادات
+    options.AddPolicy("VerifiedBidder", policy => 
+        policy.RequireClaim("IsVerifiedBidder", "True"));
+    
+    // Policy للبائعين فقط
+    options.AddPolicy("SellerOnly", policy => 
+        policy.RequireRole("Seller"));
+    
+    // Policy للأطباء فقط
+    options.AddPolicy("VetOnly", policy => 
+        policy.RequireRole("EquineVet"));
+});
 
 // ========== 5. تسجيل Services الخاصة بنا ==========
 builder.Services.AddScoped<IFileService, FileService>();
-// builder.Services.AddScoped<IAuthService, AuthService>(); // معلق حالياً لأننا بنستخدم Identity مباشرة
-
-// ========== 6. إضافة Email Service ==========
 builder.Services.AddScoped<IEmailService, EmailService>();
 
-// ========== 7. إضافة Controllers ==========
+// ========== 6. إضافة Controllers ==========
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
-        // لتجنب الـ Cyclical references
         options.JsonSerializerOptions.ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles;
         options.JsonSerializerOptions.WriteIndented = true;
     });
 
-// ========== 8. إضافة CORS (للتعامل مع React) ==========
+// ========== 7. إضافة CORS ==========
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowReactApp",
         policy =>
         {
             policy.WithOrigins(
-                    "http://localhost:5173",  // Vite default
-                    "http://localhost:3000",  // React default
-                    "http://localhost:5000"   // Maybe API
+                    "http://localhost:5173",
+                    "http://localhost:3000",
+                    "http://localhost:5000"
                 )
                 .AllowAnyHeader()
                 .AllowAnyMethod()
@@ -97,7 +114,7 @@ builder.Services.AddCors(options =>
         });
 });
 
-// ========== 9. إضافة Swagger للـ API Documentation ==========
+// ========== 8. إضافة Swagger ==========
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
@@ -105,15 +122,9 @@ builder.Services.AddSwaggerGen(c =>
     { 
         Title = "Arabian Horse System API", 
         Version = "v1",
-        Description = "API لنظام الخيول العربية",
-        Contact = new OpenApiContact
-        {
-            Name = "Support Team",
-            Email = "support@arabianhorse.com"
-        }
+        Description = "API لنظام الخيول العربية"
     });
     
-    // إضافة JWT Authentication لـ Swagger
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
         Description = "JWT Authorization header using the Bearer scheme. Example: \"Authorization: Bearer {token}\"",
@@ -139,19 +150,18 @@ builder.Services.AddSwaggerGen(c =>
     });
 });
 
-// ========== 10. بناء التطبيق ==========
+// ========== 9. بناء التطبيق ==========
 var app = builder.Build();
 
-// ========== 11. إعداد Middleware Pipeline ==========
+// ========== 10. إعداد Middleware Pipeline ==========
 
-// Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI(c =>
     {
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "Arabian Horse API V1");
-        c.RoutePrefix = string.Empty; // لتكون الصفحة الرئيسية هي Swagger
+        c.RoutePrefix = string.Empty;
     });
 }
 else
@@ -159,41 +169,31 @@ else
     app.UseHttpsRedirection();
 }
 
-// استخدام CORS (مهم يكون قبل Authentication)
 app.UseCors("AllowReactApp");
-
-// Static Files (للملفات المرفوعة)
 app.UseStaticFiles();
-
-// Routing
 app.UseRouting();
-
-// Authentication & Authorization (الترتيب مهم)
 app.UseAuthentication();
 app.UseAuthorization();
-
-// Map Controllers
 app.MapControllers();
 
-// ========== 12. Seed Database (اختياري) ==========
+// ========== 11. Seed Database (مع تشغيل الـ Seeder) ==========
 using (var scope = app.Services.CreateScope())
 {
     var services = scope.ServiceProvider;
     try
     {
-        // للتأكد من إنشاء قاعدة البيانات
         var context = services.GetRequiredService<ApplicationDbContext>();
         await context.Database.MigrateAsync();
         
-        // لو عايزة تضيف بيانات افتراضية
-        // await DbSeeder.SeedAsync(services);
+        // ✅ هنا شغلي الـ Seeder (فكي التعليق)
+        await DbSeeder.SeedAsync(services);
     }
     catch (Exception ex)
     {
         var logger = services.GetRequiredService<ILogger<Program>>();
-        logger.LogError(ex, "An error occurred while migrating the database.");
+        logger.LogError(ex, "An error occurred while migrating or seeding the database.");
     }
 }
 
-// ========== 13. تشغيل التطبيق ==========
+// ========== 12. تشغيل التطبيق ==========
 app.Run();
